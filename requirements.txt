@@ -1,2 +1,3 @@
 python-telegram-bot
 gradio_client
+deep-translator
