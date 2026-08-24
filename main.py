@@ -1,18 +1,19 @@
 import os
+import time
 import asyncio
+import requests
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from gradio_client import Client
 from deep_translator import GoogleTranslator
 
-# 1. فتح منفذ خفيف لإبقاء سيرفر Render شغالاً (Live)
+# 1. خادم ويب مصغر لإبقاء Render في حالة Live
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Video Bot is Active")
+        self.wfile.write(b"Bot Active")
 
 def run_web_port():
     port = int(os.environ.get("PORT", 10000))
@@ -24,77 +25,57 @@ threading.Thread(target=run_web_port, daemon=True).start()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
-# 2. واجهة الترحيب عند فتح البوت /start
+# رابط السيرفر الرسمي المباشر لتوليد الفيديو (بدون مساحات شخصية)
+MODEL_URL = "https://api-inference.huggingface.co/models/damo-vilab/modelscope-text-to-video-synthesis"
+
+# 2. واجهة الترحيب /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "مرحباً بك في بوت صناعة الفيديوهات! 🎬✨\n\n"
-        "أرسل لي وصف الفيديو الذي تريد إنشاءه بأي لغة:\n"
-        "• العربية 🇸🇦\n"
-        "• الفرنسية 🇫🇷\n"
-        "• الإنجليزية 🇬🇧\n\n"
-        "وسأقوم بتوليد فيديو متحرك لك!"
+        "أرسل لي وصف الفيديو بـ **العربية**، **الفرنسية**، أو **الإنجليزي** وسأقوم بتوليد مقطع فيديو لك!"
     )
     await update.message.reply_text(welcome_text)
 
-# 3. دالة توليد الفيديو الحقيقي عبر HuggingFace
-def generate_video_file(prompt_text, token):
-    # ترجمة النص للإنجليزية لضمان أفضل جودة
+# 3. طلب الفيديو مباشرة من API الرسمي
+def query_official_api(prompt_text, token):
     english_prompt = GoogleTranslator(source='auto', target='en').translate(prompt_text)
+    headers = {"Authorization": f"Bearer {token}"}
     
-    # قائمة بمساحات سيرفرات الفيديو المتاحة
-    spaces_to_try = [
-        "fffiloni/LTX-Video-playground",
-        "ZeroGPU-explorers/LTX-Video",
-        "hao-nguyen/LTX-Video"
-    ]
-    
-    last_err = None
-    for space in spaces_to_try:
-        try:
-            client = Client(space, token=token)
-            result = client.predict(
-                prompt=english_prompt,
-                api_name="/predict"
-            )
-            if isinstance(result, (list, tuple)):
-                return result[0]
-            return result
-        except Exception as e:
-            last_err = e
-            continue
+    # محاولة الإرسال مع الانتظار في حال كان السيرفر يستعد (Warm up)
+    for _ in range(3):
+        response = requests.post(MODEL_URL, headers=headers, json={"inputs": english_prompt}, timeout=120)
+        if response.status_code == 200:
+            return response.content
+        elif response.status_code == 503:
+            time.sleep(15) # السيرفر يحمل النموذج في الذاكرة
+        else:
+            break
             
-    raise last_err if last_err else Exception("جميع سيرفرات الفيديو متوقفة حالياً")
+    raise Exception(f"خطأ استجابة السيرفر: {response.status_code}")
 
-# 4. استقبال الرسائل وإرسال الفيديو MP4
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 4. معالجة الرسالة وإرسال الفيديو MP4
+async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_prompt = update.message.text
-    status_msg = await update.message.reply_text("⏳ جاري ترجمة الوصف وإنشاء الفيديو (MP4)...\nيرجى الانتظار من 2 إلى 4 دقائق حسب طابور السيرفر 🎬")
+    status_msg = await update.message.reply_text("⏳ جاري إنشاء الفيديو عبر السيرفر الرسمي (يرجى الانتظار قليلاً)...")
 
     try:
-        # تشغيل التوليد في الخلفية بمهلة 5 دقائق
-        video_path = await asyncio.wait_for(
-            asyncio.to_thread(generate_video_file, user_prompt, HF_TOKEN),
-            timeout=300.0
-        )
+        video_bytes = await asyncio.to_thread(query_official_api, user_prompt, HF_TOKEN)
+        
+        video_filename = "output_video.mp4"
+        with open(video_filename, "wb") as f:
+            f.write(video_bytes)
 
-        # إرسال الفيديو المكتمل للمستخدم
-        with open(video_path, 'rb') as video_file:
-            await update.message.reply_video(
-                video=video_file,
-                caption=f"🎬 **تم إنشاء الفيديو لـ:** {user_prompt}"
-            )
+        with open(video_filename, "rb") as f:
+            await update.message.reply_video(video=f, caption=f"🎬 **تم إنشاء الفيديو لـ:** {user_prompt}")
+        
         await status_msg.delete()
-
-    except asyncio.TimeoutError:
-        await status_msg.edit_text("⚠️ استغرق السيرفر وقتاً طويلاً في طابور الانتظار. أرسل الطلب مرة أخرى.")
     except Exception as e:
-        err_details = str(e)[:200]
-        await status_msg.edit_text(f"❌ تعذر إنشاء الفيديو حالياً:\n{err_details}")
+        err_msg = str(e)[:200]
+        await status_msg.edit_text(f"❌ تعذر التوليد حالياً:\n{err_msg}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_video))
     print("Bot is running...")
     app.run_polling()
