@@ -6,7 +6,6 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 from gradio_client import Client
 from deep_translator import GoogleTranslator
 
-# فتح منفذ الويب فوراً لإرضاء Render
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,7 +19,6 @@ def run_web_port():
 
 threading.Thread(target=run_web_port, daemon=True).start()
 
-# إعدادات البوت
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
@@ -30,12 +28,15 @@ async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         english_prompt = GoogleTranslator(source='auto', target='en').translate(user_prompt)
+        
+        # الاتصال بالسيرفر
         ai_client = Client("Lightricks/LTX-Video", token=HF_TOKEN)
         result = ai_client.predict(prompt=english_prompt, api_name="/predict")
+        
         await update.message.reply_video(video=open(result, 'rb'))
     except Exception as e:
-        print(f"Error: {e}")
-        await update.message.reply_text("السيرفر مشغول حالياً، يرجى المحاولة بعد قليل.")
+        error_details = str(e)[:300]  # اقتطاع أول 300 حرف من الخطأ
+        await update.message.reply_text(f"❌ حدث خطأ في النموذج:\n{error_details}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
