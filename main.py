@@ -36,24 +36,25 @@ if GEMINI_API_KEY:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "مرحباً بك في صانع المستندات الذكي! 📄🤖\n\n"
-        "اكتب لي أي وصف لمستند تعليمي أو إداري (مثل: قائمة نقاط، شهادة، استدعاء، جدول تنقيط...) "
+        "اكتب لي أي وصف لمستند تعليمي أو إداري "
         "مع ذكر التفاصيل والأعمدة وعدد الصفوف، وسأقوم بتحليل الطلب بالذكاء الاصطناعي وإنشاء المستند بدقة عالية!"
     )
     await update.message.reply_text(welcome_text)
 
-# 3. دالة تحليل الطلب واستخراج الهيكل بالذكاء الاصطناعي
+# 3. دالة تحليل الطلب باستخراج النموذج المتاح تلقائياً
 def generate_doc_structure_from_ai(user_prompt: str) -> dict:
     if not GEMINI_API_KEY:
         raise Exception("لم يتم إضافة GEMINI_API_KEY في إعدادات Render!")
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # تجربة النماذج المتاحة بالتتابع لتفادي خطأ 404
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-pro"]
     
     prompt_instruction = f"""
     أنت خبير في إنشاء وتصميم المستندات والوثائق المدرسية والإدارية.
-    قم بتحليل طلب المستخدم بدقة واغرس كافة الأعمدة والبيانات والصفوف المطلوبة، ثم أرجع النتيجة على شكل JSON فقط بدون أي كلام خارجي:
+    قم بتحليل طلب المستخدم بدقة واستخرج كافة الأعمدة والبيانات والصفوف المطلوبة، ثم أرجع النتيجة على شكل JSON فقط بدون أي كلام خارجي:
 
     {{
-        "header_top": "النص الهيدر العلوي الكامل مثلاً (الجمهورية الجزائرية الديمقراطية الشعبية / وزارة التربية الوطنية)",
+        "header_top": "النص الهيدر العلوي الكامل (مثال: الجمهورية الجزائرية الديمقراطية الشعبية)",
         "title": "العنوان الرئيسي المكتوب في الأعلى",
         "metadata": ["المادة: الرياضيات", "السنة: الأولى متوسط", "الأستاذ: ...", "السنة الدراسية: 2025/2026"],
         "has_table": true,
@@ -66,30 +67,37 @@ def generate_doc_structure_from_ai(user_prompt: str) -> dict:
     {user_prompt}
     """
 
-    response = model.generate_content(prompt_instruction)
-    text = response.text.strip()
-    
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-        
-    return json.loads(text.strip())
+    last_error = None
+    for model_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt_instruction)
+            text = response.text.strip()
+            
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+                
+            return json.loads(text.strip())
+        except Exception as e:
+            last_error = e
+            continue
 
-# 4. تحويل هيكل JSON إلى مستند Word محترف
+    raise last_error if last_error else Exception("تعذر الاتصال بنماذج Gemini")
+
+# 4. تحويل هيكل JSON إلى مستند Word
 def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
     doc = Document()
     
-    # ضبط الهوامش
     for section in doc.sections:
         section.top_margin = Inches(0.5)
         section.bottom_margin = Inches(0.5)
         section.left_margin = Inches(0.5)
         section.right_margin = Inches(0.5)
 
-    # الهيدر العلوي
     header_text = doc_data.get("header_top", "")
     if header_text:
         p_head = doc.add_paragraph()
@@ -99,7 +107,6 @@ def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
         r_head.font.size = Pt(11)
         p_head.paragraph_format.space_after = Pt(6)
 
-    # العنوان الرئيسي
     title_text = doc_data.get("title", "مستند رسمي")
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -109,7 +116,6 @@ def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
     r_title.font.color.rgb = RGBColor(0, 51, 102)
     p_title.paragraph_format.space_after = Pt(10)
 
-    # البيانات الإضافية (الأستاذ، السنة، المادة...)
     metadata = doc_data.get("metadata", [])
     if metadata:
         p_meta = doc.add_paragraph()
@@ -119,7 +125,6 @@ def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
         r_meta.font.bold = True
         p_meta.paragraph_format.space_after = Pt(12)
 
-    # إنشاء الجدول الديناميكي بناءً على الأعمدة وعدد الصفوف
     if doc_data.get("has_table", False):
         cols = doc_data.get("table_columns", ["الرقم", "الاسم واللقب"])
         rows_cnt = doc_data.get("rows_count", 10)
@@ -128,7 +133,6 @@ def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.style = 'Table Grid'
         
-        # رأس الجدول
         hdr_cells = table.rows[0].cells
         for idx, col_name in enumerate(cols):
             hdr_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -136,16 +140,13 @@ def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
             r.font.bold = True
             r.font.size = Pt(9.5)
             
-        # صفوف الترقيم والبيانات
         for r_idx in range(1, rows_cnt + 1):
             row_cells = table.rows[r_idx].cells
             for c_idx in range(len(cols)):
                 row_cells[c_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                # ترقيم تلقائي لعمود الرقم
                 if c_idx == 0 and ("رقم" in cols[0] or "الرقم" in cols[0] or "N°" in cols[0]):
                     row_cells[0].paragraphs[0].text = str(r_idx)
 
-    # التوقيع والملاحظات
     footer_notes = doc_data.get("footer_notes", "")
     if footer_notes:
         doc.add_paragraph().paragraph_format.space_before = Pt(15)
@@ -163,25 +164,22 @@ def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
 # 5. معالجة الرسائل
 async def handle_document_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_prompt = update.message.text
-    status_msg = await update.message.reply_text("🧠 جاري تحليل وصفك بالذكاء الاصطناعي وبناء كافة الصفوف والأعمدة المطلوب...")
+    status_msg = await update.message.reply_text("🧠 جاري تحليل وصفك وبناء الصفوف والأعمدة بالذكاء الاصطناعي...")
 
     try:
-        # استخراج الهيكل بالذكاء الاصطناعي
         doc_data = await asyncio.to_thread(generate_doc_structure_from_ai, user_prompt)
-        
-        # بناء ملف docx
         doc_stream = await asyncio.to_thread(build_docx_from_structure, doc_data)
         
         await update.message.reply_document(
             document=doc_stream,
             filename="Document_Custom.docx",
-            caption="✨ **تم إنشاء المستند بالذكاء الاصطناعي بناءً على وصفك الدقيق!**"
+            caption="✨ **تم إنشاء المستند بنجاح بناءً على طلبك!**"
         )
         await status_msg.delete()
 
     except Exception as e:
         err_msg = str(e)[:250]
-        await status_msg.edit_text(f"❌ حدث خطأ:\n{err_msg}")
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء التوليد:\n{err_msg}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
