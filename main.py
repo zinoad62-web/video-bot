@@ -3,11 +3,11 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from gradio_client import Client
 
-# جلب المفاتيح من متغيرات البيئة في Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
-ai_client = Client("Lightricks/LTX-Video", hf_token=HF_TOKEN)
+# التعديل في هذا السطر: تم تغيير hf_token إلى token
+ai_client = Client("Lightricks/LTX-Video", token=HF_TOKEN)
 
 async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_prompt = update.message.text
