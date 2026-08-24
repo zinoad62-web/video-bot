@@ -3,8 +3,11 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from gradio_client import Client
 
-# الاتصال بنموذج الذكاء الاصطناعي
-ai_client = Client("Lightricks/LTX-Video")
+# جلب المفاتيح من متغيرات البيئة في Render
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+ai_client = Client("Lightricks/LTX-Video", hf_token=HF_TOKEN)
 
 async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_prompt = update.message.text
@@ -17,7 +20,6 @@ async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("السيرفر مشغول حالياً، يرجى المحاولة بعد قليل.")
 
 if __name__ == '__main__':
-    app = ApplicationBuilder().token("8566254634:AAHmSemE1P0KoLsmS7cmJZNHtwu0ah98klk").build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), generate_video))
     app.run_polling()
-  
