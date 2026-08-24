@@ -29,14 +29,25 @@ async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         english_prompt = GoogleTranslator(source='auto', target='en').translate(user_prompt)
         
-        # الاتصال بالسيرفر
-        ai_client = Client("Lightricks/LTX-Video", token=HF_TOKEN)
-        result = ai_client.predict(prompt=english_prompt, api_name="/predict")
+        # الاتصال بمساحة عمل نشطة (Space)
+        ai_client = Client("fffiloni/LTX-Video", token=HF_TOKEN)
+        result = ai_client.predict(
+            prompt=english_prompt,
+            negative_prompt="worst quality, low quality",
+            frame_rate=25,
+            api_name="/generate_video_1"
+        )
         
         await update.message.reply_video(video=open(result, 'rb'))
     except Exception as e:
-        error_details = str(e)[:300]  # اقتطاع أول 300 حرف من الخطأ
-        await update.message.reply_text(f"❌ حدث خطأ في النموذج:\n{error_details}")
+        # تجربة مسار احتياطي في حال اختلاف أسماء الدوال
+        try:
+            ai_client = Client("KingNish/LTX-Video", token=HF_TOKEN)
+            result = ai_client.predict(prompt=english_prompt, api_name="/predict")
+            await update.message.reply_video(video=open(result, 'rb'))
+        except Exception as err:
+            error_details = str(err)[:300]
+            await update.message.reply_text(f"❌ حدث خطأ أثناء التوليد:\n{error_details}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
