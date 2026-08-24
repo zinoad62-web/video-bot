@@ -1,20 +1,23 @@
 import os
 import io
+import json
+import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import google.generativeai as genai
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
-# 1. خادم وهمي لإبقاء Render في حالة Live
+# 1. خادم ويب مصغر لإبقاء Render في حالة Live
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Doc Generator Active")
+        self.wfile.write(b"Doc AI Generator Active")
 
 def run_web_port():
     port = int(os.environ.get("PORT", 10000))
@@ -24,146 +27,165 @@ def run_web_port():
 threading.Thread(target=run_web_port, daemon=True).start()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# 2. رسالة الترحيب والتعليمات عند /start
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# 2. رسالة الترحيب /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "مرحباً بك في بوت صانع المستندات والوثائق التعليمية! 📄🎓\n\n"
-        "يمكنني توليد مستندات رسمية قابلة للطباعة والتعديل بصيغة (Word) مثل:\n"
-        "• 📝 **أوراق إجابة واستمارات اختبارات**\n"
-        "• 📜 **تصاريح شرفية وشهادات حضور/تقدير**\n"
-        "• ✉️ **استدعاءات ومراسلات إدارية للمؤسسات**\n\n"
-        "أرسل لي وصف المستند وما تريد تضمينه فيه (بالعربية، الفرنسية، أو الإنجليزية) وسأصممه لك فوراً!"
+        "مرحباً بك في صانع المستندات الذكي! 📄🤖\n\n"
+        "اكتب لي أي وصف لمستند تعليمي أو إداري (مثل: قائمة نقاط، شهادة، استدعاء، جدول تنقيط...) "
+        "مع ذكر التفاصيل والأعمدة وعدد الصفوف، وسأقوم بتحليل الطلب بالذكاء الاصطناعي وإنشاء المستند بدقة عالية!"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await update.message.reply_text(welcome_text)
 
-# 3. بناء وتنسيق المستند التعليمي
-def create_educational_document(prompt_text: str) -> io.BytesIO:
+# 3. دالة تحليل الطلب واستخراج الهيكل بالذكاء الاصطناعي
+def generate_doc_structure_from_ai(user_prompt: str) -> dict:
+    if not GEMINI_API_KEY:
+        raise Exception("لم يتم إضافة GEMINI_API_KEY في إعدادات Render!")
+
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    
+    prompt_instruction = f"""
+    أنت خبير في إنشاء وتصميم المستندات والوثائق المدرسية والإدارية.
+    قم بتحليل طلب المستخدم بدقة واغرس كافة الأعمدة والبيانات والصفوف المطلوبة، ثم أرجع النتيجة على شكل JSON فقط بدون أي كلام خارجي:
+
+    {{
+        "header_top": "النص الهيدر العلوي الكامل مثلاً (الجمهورية الجزائرية الديمقراطية الشعبية / وزارة التربية الوطنية)",
+        "title": "العنوان الرئيسي المكتوب في الأعلى",
+        "metadata": ["المادة: الرياضيات", "السنة: الأولى متوسط", "الأستاذ: ...", "السنة الدراسية: 2025/2026"],
+        "has_table": true,
+        "table_columns": ["الرقم", "اللقب", "الاسم", "القسم", "المراقبة المستمرة", "الفرض", "الاختبار", "المعدل", "الملاحظة"],
+        "rows_count": 35,
+        "footer_notes": "توقيع الأستاذ / ختم الإدارة"
+    }}
+
+    طلب المستخدم:
+    {user_prompt}
+    """
+
+    response = model.generate_content(prompt_instruction)
+    text = response.text.strip()
+    
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+        
+    return json.loads(text.strip())
+
+# 4. تحويل هيكل JSON إلى مستند Word محترف
+def build_docx_from_structure(doc_data: dict) -> io.BytesIO:
     doc = Document()
     
     # ضبط الهوامش
     for section in doc.sections:
-        section.top_margin = Inches(0.8)
-        section.bottom_margin = Inches(0.8)
-        section.left_margin = Inches(0.8)
-        section.right_margin = Inches(0.8)
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin = Inches(0.5)
+        section.right_margin = Inches(0.5)
 
-    # الهيدر العلوي للمؤسسة التعليمية
-    header_table = doc.add_table(rows=1, cols=2)
-    header_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    header_table.autofit = False
-    
-    cell_left = header_table.rows[0].cells[0]
-    cell_right = header_table.rows[0].cells[1]
-    
-    p_right = cell_right.paragraphs[0]
-    p_right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    run_r = p_right.add_run("المملكة / الدولة: ....................\nالمؤسسة التعليمية: ....................\nالموسم الدراسي: 2025 / 2026")
-    run_r.font.size = Pt(10)
-    run_r.font.name = "Arial"
+    # الهيدر العلوي
+    header_text = doc_data.get("header_top", "")
+    if header_text:
+        p_head = doc.add_paragraph()
+        p_head.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r_head = p_head.add_run(header_text)
+        r_head.font.bold = True
+        r_head.font.size = Pt(11)
+        p_head.paragraph_format.space_after = Pt(6)
 
-    p_left = cell_left.paragraphs[0]
-    p_left.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run_l = p_left.add_run("République / Institution\nAnnée Scolaire: 2025/2026\nClass / القسم: ....................")
-    run_l.font.size = Pt(10)
-    run_l.font.name = "Arial"
+    # العنوان الرئيسي
+    title_text = doc_data.get("title", "مستند رسمي")
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r_title = p_title.add_run(title_text)
+    r_title.font.bold = True
+    r_title.font.size = Pt(15)
+    r_title.font.color.rgb = RGBColor(0, 51, 102)
+    p_title.paragraph_format.space_after = Pt(10)
 
-    doc.add_paragraph().paragraph_format.space_after = Pt(12)
+    # البيانات الإضافية (الأستاذ، السنة، المادة...)
+    metadata = doc_data.get("metadata", [])
+    if metadata:
+        p_meta = doc.add_paragraph()
+        p_meta.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        r_meta = p_meta.add_run("  |  ".join(metadata))
+        r_meta.font.size = Pt(10)
+        r_meta.font.bold = True
+        p_meta.paragraph_format.space_after = Pt(12)
 
-    # عنوان المستند الرئيسي
-    title_p = doc.add_paragraph()
-    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # تحديد العنوان حسب الكلمات المفتاحية
-    if "إجابة" in prompt_text or "اختبار" in prompt_text or "answer" in prompt_text:
-        title_text = "ورقة إجابة رسمية - EXAM ANSWER SHEET"
-    elif "تصريح" in prompt_text or "شهادة" in prompt_text or "statement" in prompt_text:
-        title_text = "تصريح إداري / شهادة رسمية"
-    else:
-        title_text = "مستند تعليمي إداري"
-
-    title_run = title_p.add_run(title_text)
-    title_run.font.bold = True
-    title_run.font.size = Pt(18)
-    title_run.font.color.rgb = RGBColor(0, 51, 102)
-    title_p.paragraph_format.space_after = Pt(18)
-
-    # جدول بيانات الطالب / المستفيد
-    info_table = doc.add_table(rows=2, cols=2)
-    info_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    info_table.style = 'Table Grid'
-    
-    info_table.rows[0].cells[1].paragraphs[0].text = "الاسم واللقب: ..........................................."
-    info_table.rows[0].cells[0].paragraphs[0].text = "Nom & Prénom: ......................................."
-    info_table.rows[1].cells[1].paragraphs[0].text = "المادة / الموضوع: ....................................."
-    info_table.rows[1].cells[0].paragraphs[0].text = "تاريخ التقديم: ..... / ..... / 2026"
-    
-    doc.add_paragraph().paragraph_format.space_after = Pt(14)
-
-    # محتوى الطلب المدخل من المستخدم
-    body_header = doc.add_paragraph()
-    bh_run = body_header.add_run("تفاصيل المستند / Content Details:")
-    bh_run.font.bold = True
-    bh_run.font.size = Pt(12)
-
-    body_p = doc.add_paragraph()
-    body_run = body_p.add_run(prompt_text)
-    body_run.font.size = Pt(11)
-    body_p.paragraph_format.space_after = Pt(20)
-
-    # قسم خاص بالأسئلة أو جدول الإجابات إذا كان المطلوب ورقة إجابة
-    if "إجابة" in prompt_text or "اختبار" in prompt_text or "answer" in prompt_text:
-        q_table = doc.add_table(rows=6, cols=3)
-        q_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        q_table.style = 'Table Grid'
+    # إنشاء الجدول الديناميكي بناءً على الأعمدة وعدد الصفوف
+    if doc_data.get("has_table", False):
+        cols = doc_data.get("table_columns", ["الرقم", "الاسم واللقب"])
+        rows_cnt = doc_data.get("rows_count", 10)
         
-        headers = ["رقم السؤال / Q#", "إجابة الطالب / Answer", "العلامة / Mark"]
-        for i, h in enumerate(headers):
-            cell = q_table.rows[0].cells[i]
-            cell.paragraphs[0].text = h
-            cell.paragraphs[0].runs[0].font.bold = True
+        table = doc.add_table(rows=rows_cnt + 1, cols=len(cols))
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.style = 'Table Grid'
+        
+        # رأس الجدول
+        hdr_cells = table.rows[0].cells
+        for idx, col_name in enumerate(cols):
+            hdr_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r = hdr_cells[idx].paragraphs[0].add_run(col_name)
+            r.font.bold = True
+            r.font.size = Pt(9.5)
             
-        for row_idx in range(1, 6):
-            q_table.rows[row_idx].cells[0].paragraphs[0].text = f"السؤال {row_idx}"
+        # صفوف الترقيم والبيانات
+        for r_idx in range(1, rows_cnt + 1):
+            row_cells = table.rows[r_idx].cells
+            for c_idx in range(len(cols)):
+                row_cells[c_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                # ترقيم تلقائي لعمود الرقم
+                if c_idx == 0 and ("رقم" in cols[0] or "الرقم" in cols[0] or "N°" in cols[0]):
+                    row_cells[0].paragraphs[0].text = str(r_idx)
 
-    doc.add_paragraph().paragraph_format.space_after = Pt(30)
+    # التوقيع والملاحظات
+    footer_notes = doc_data.get("footer_notes", "")
+    if footer_notes:
+        doc.add_paragraph().paragraph_format.space_before = Pt(15)
+        p_foot = doc.add_paragraph()
+        p_foot.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        r_foot = p_foot.add_run(footer_notes)
+        r_foot.font.size = Pt(10)
+        r_foot.font.bold = True
 
-    # قسم التوقيع والختم الإداري
-    sig_table = doc.add_table(rows=1, cols=2)
-    sig_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    sig_table.rows[0].cells[1].paragraphs[0].text = "توقيع وختم الإدارة / الأستاذ:\n\n.........................................."
-    sig_table.rows[0].cells[0].paragraphs[0].text = "توقيع الطالب / المعني:\n\n.........................................."
-
-    # حفظ المستند في الذاكرة
     file_stream = io.BytesIO()
     doc.save(file_stream)
     file_stream.seek(0)
     return file_stream
 
-# 4. استقبال الرسائل وتوليد الوثيقة
+# 5. معالجة الرسائل
 async def handle_document_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_prompt = update.message.text
-    status_msg = await update.message.reply_text("⏳ جاري تصميم وتنسيق المستند التعليمي...")
+    status_msg = await update.message.reply_text("🧠 جاري تحليل وصفك بالذكاء الاصطناعي وبناء كافة الصفوف والأعمدة المطلوب...")
 
     try:
-        # إنشاء ملف Word
-        doc_stream = create_educational_document(user_prompt)
+        # استخراج الهيكل بالذكاء الاصطناعي
+        doc_data = await asyncio.to_thread(generate_doc_structure_from_ai, user_prompt)
         
-        # إرسال المستند جاهزاً للتحميل
+        # بناء ملف docx
+        doc_stream = await asyncio.to_thread(build_docx_from_structure, doc_data)
+        
         await update.message.reply_document(
             document=doc_stream,
-            filename="Educational_Document.docx",
-            caption="✅ تم إنشاء المستند بنجاح! يمكنك فتحه وتعديله أو طباعته مباشرة."
+            filename="Document_Custom.docx",
+            caption="✨ **تم إنشاء المستند بالذكاء الاصطناعي بناءً على وصفك الدقيق!**"
         )
         await status_msg.delete()
 
     except Exception as e:
-        err_msg = str(e)[:200]
-        await status_msg.edit_text(f"❌ حدث خطأ أثناء إنشاء المستند:\n{err_msg}")
+        err_msg = str(e)[:250]
+        await status_msg.edit_text(f"❌ حدث خطأ:\n{err_msg}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_document_request))
-    print("Document Bot is running...")
+    print("AI Document Bot is running...")
     app.run_polling()
