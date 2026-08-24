@@ -6,12 +6,12 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from gradio_client import Client
 from deep_translator import GoogleTranslator
 
-# سيرفر بسيط لضمان استمرار عمل البوت على منصات الاستضافة مثل Render
+# تشغيل منفذ خفيف لإبقاء Render نشطاً
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is active and running!")
+        self.wfile.write(b"Bot is alive")
 
 def run_web_port():
     port = int(os.environ.get("PORT", 10000))
@@ -20,70 +20,46 @@ def run_web_port():
 
 threading.Thread(target=run_web_port, daemon=True).start()
 
-# جلب التوكنات من متغيرات البيئة
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
-# أمر الترحيب عند بدء استخدام البوت (/start)
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# رسالة الترحيب عند بدء البوت
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "👋 **أهلاً بك في بوت صانع الفيديوهات الذكي!**\n\n"
-        "يمكنني تحويل أي فكرة أو وصف إلى فيديو مميز خلال لحظات باستخدام الذكاء الاصطناعي.\n\n"
-        "🌐 **اللغات المدعومة:**\n"
-        "يمكنك كتابة الوصف بأي لغة تريدها:\n"
-        "• 🇸🇦 **العربية** (مثال: قط يحمل مظلة تحت المطر)\n"
-        "• 🇫🇷 **الفرنسية** (مثال: Un chat avec un parapluie sous la pluie)\n"
-        "• 🇬🇧 **الإنجليزيّة** (مثال: A cat holding an umbrella in the rain)\n\n"
-        "✨ **أرسل وصف الفيديو الآن وسأقوم بإنشائه لك فوراً!**"
+        "مرحباً بك في صانع الفيديوهات! 🎬✨\n\n"
+        "اكتب لي وصف الفيديو الذي تريد إنشاءه بأي لغة:\n"
+        "• العربية 🇸🇦\n"
+        "• الفرنسية 🇫🇷\n"
+        "• الإنجليزية 🇬🇧\n\n"
+        "مثال: `قط يصطاد السمك في النهر`"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await update.message.reply_text(welcome_text)
 
-# معالجة طلبات إنشاء الفيديو
+# معالجة طلبات الفيديوهات
 async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_prompt = update.message.text.strip()
-    
-    # إرسال رسالة انتظار للمستخدم
-    status_msg = await update.message.reply_text(
-        "⏳ **جاري ترجمة الوصف وإنشاء الفيديو...**\nيرجى الانتظار بضع ثوانٍ 🎬",
-        parse_mode="Markdown"
-    )
+    user_prompt = update.message.text
+    await update.message.reply_text("⏳ تم إرسال الطلب لطابور المعالجة..\nيرجى الانتظار من 2 إلى 4 دقائق لتوليد الفيديو 🎬")
     
     try:
-        # ترجمة النص تلقائياً إلى اللغة الإنجليزية لضمان أفضل نتيجة للنموذج
+        # ترجمة الوصف إلى الإنجليزية تلقائياً
         english_prompt = GoogleTranslator(source='auto', target='en').translate(user_prompt)
         
-        # الاتصال بنموذج توليد الفيديو
-        ai_client = Client("Lightricks/ltx-video-distilled", token=HF_TOKEN)
-        
-        # استدعاء واجهة إنشاء الفيديو
+        # الاتصال بالنموذج
+        ai_client = Client("multimodalart/LTX-Video", token=HF_TOKEN)
         result = ai_client.predict(
             prompt=english_prompt,
-            negative_prompt="worst quality, low quality, blurry, distorted motion",
+            negative_prompt="worst quality, low quality, blurry",
             api_name="/generate_video"
         )
         
-        # رفع وإرسال الفيديو للمستخدم
-        await status_msg.edit_text("📤 **تم إنشاء الفيديو بنجاح! جاري الرفع...**", parse_mode="Markdown")
-        await update.message.reply_video(
-            video=open(result, 'rb'),
-            caption=f"🎬 **الوصف:** {user_prompt}\n🔤 **الترجمة للنموذج:** {english_prompt}"
-        )
+        await update.message.reply_video(video=open(result, 'rb'), caption="✨ تم إنشاء الفيديو بنجاح!")
     except Exception as e:
         error_details = str(e)[:200]
-        await status_msg.edit_text(
-            f"❌ **حدث خطأ أثناء إنشاء الفيديو:**\n`{error_details}`\n\nيرجى إعادة المحاولة بعد القليل.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"❌ السيرفر مشغول جداً حالياً أو انتهت مهلة الانتظار. أعد المحاولة بعد قليل.\n{error_details}")
 
 if __name__ == '__main__':
-    if not TELEGRAM_TOKEN:
-        print("⚠️ خطأ: لم يتم ضبط TELEGRAM_TOKEN في متغيرات البيئة.")
-    else:
-        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        
-        # إضافات المعالجة
-        app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), generate_video))
-        
-        print("✅ البوت جاهز ويعمل الآن...")
-        app.run_polling()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), generate_video))
+    print("Bot is running...")
+    app.run_polling()
