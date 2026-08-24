@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import base64
 import urllib.request
 import asyncio
 import threading
@@ -12,7 +13,6 @@ from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
-# خادم حيوية لإبقاء البوت متصلاً
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -29,11 +29,10 @@ threading.Thread(target=run_web_port, daemon=True).start()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-def call_gemini_direct(prompt: str) -> dict:
+def call_gemini_direct(prompt: str, image_bytes: bytes = None) -> dict:
     if not GEMINI_API_KEY:
-        raise Exception("مفتاح GEMINI_API_KEY غير موجود في إعدادات Render!")
+        raise Exception("مفتاح GEMINI_API_KEY غير موجود!")
 
-    # 1. اكتشاف النماذج المتاحة لمفتاحك تلقائياً لتفادي خطأ 404 نهائياً
     list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
     req_list = urllib.request.Request(list_url)
     
@@ -45,35 +44,43 @@ def call_gemini_direct(prompt: str) -> dict:
         for m in models_data.get("models", []):
             methods = m.get("supportedGenerationMethods", [])
             if "generateContent" in methods:
-                valid_models.append(m['name']) # مثال: models/gemini-1.5-flash
+                valid_models.append(m['name'])
     except Exception as e:
-        raise Exception(f"خطأ في مفتاح Google API: {e}")
+        raise Exception(f"خطأ في الاتصال بجوجل: {e}")
 
     if not valid_models:
-        raise Exception("لم يتم العثور على أي نموذج مفعل لهذا المفتاح.")
+        raise Exception("لم يتم العثور على أي نموذج مفعل.")
 
     system_instruction = (
-        "أنت خبير في تصميم الوثائق المدرسية والإدارية. قم بتحليل طلب المستخدم وأرجع الناتج بصيغة JSON فقط "
-        "بدون أي كلام خارجي أو تنسيق markdown:\n"
+        "أنت خبير في تحليل الوثائق والصور وتصميم مستندات Word. قم بتحليل الطلب والصورة المرفقة (إن وجدت) "
+        "وأرجع الناتج بصيغة JSON فقط بدون أسلوب markdown:\n"
         "{\n"
         '  "header_top": "الجمهورية الجزائرية الديمقراطية الشعبية",\n'
-        '  "title": "قائمة نتائج الرياضيات - السنة الأولى متوسط",\n'
-        '  "metadata": ["المادة: الرياضيات", "السنة: الأولى متوسط", "الأستاذ: ...", "السنة الدراسية: 2025/2026"],\n'
+        '  "title": "مذكرة إدماج جزئي",\n'
+        '  "metadata": ["الميدان: ...", "المقطع التعلمي: ...", "المستوى: ..."],\n'
         '  "has_table": true,\n'
-        '  "table_columns": ["الرقم", "اللقب", "الاسم", "القسم", "المراقبة المستمرة", "الفرض", "الاختبار", "المعدل", "الملاحظة"],\n'
-        '  "rows_count": 35,\n'
-        '  "footer_notes": "توقيع الأستاذ / ختم الإدارة"\n'
+        '  "table_columns": ["نص الوضعية", "الحل", "المورد المستهدف"],\n'
+        '  "rows_count": 5,\n'
+        '  "footer_notes": ""\n'
         "}"
     )
 
-    payload = {
-        "contents": [{
-            "parts": [{"text": f"{system_instruction}\n\nطلب المستخدم:\n{prompt}"}]
-        }]
-    }
+    parts = []
+    if image_bytes:
+        b64_image = base64.b64encode(image_bytes).decode('utf-8')
+        parts.append({
+            "inlineData": {
+                "mimeType": "image/jpeg",
+                "data": b64_image
+            }
+        })
+
+    full_text = f"{system_instruction}\n\nطلب المستخدم:\n{prompt if prompt else 'قم بإنشاء وثيقة مطابقة لهذه الصورة'}"
+    parts.append({"text": full_text})
+
+    payload = {"contents": [{"parts": parts}]}
     data = json.dumps(payload).encode('utf-8')
 
-    # 2. تجربة النماذج المكتشفة بالترتيب
     last_err = None
     for model_full_name in valid_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_full_name}:generateContent?key={GEMINI_API_KEY}"
@@ -92,7 +99,7 @@ def call_gemini_direct(prompt: str) -> dict:
             last_err = e
             continue
 
-    raise Exception(f"تعذر التوليد: {last_err}")
+    raise Exception(f"تعذر معالجة الصورة أو النص: {last_err}")
 
 def build_docx(doc_data: dict) -> io.BytesIO:
     doc = Document()
@@ -125,8 +132,8 @@ def build_docx(doc_data: dict) -> io.BytesIO:
         r.font.size = Pt(10)
 
     if doc_data.get("has_table", False):
-        cols = doc_data.get("table_columns", ["الرقم", "الاسم"])
-        rows_cnt = doc_data.get("rows_count", 10)
+        cols = doc_data.get("table_columns", ["العمود 1", "العمود 2"])
+        rows_cnt = doc_data.get("rows_count", 5)
         
         table = doc.add_table(rows=rows_cnt + 1, cols=len(cols))
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -137,14 +144,7 @@ def build_docx(doc_data: dict) -> io.BytesIO:
             hdr_cells[idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             r = hdr_cells[idx].paragraphs[0].add_run(col_name)
             r.font.bold = True
-            r.font.size = Pt(9.5)
-            
-        for r_idx in range(1, rows_cnt + 1):
-            row_cells = table.rows[r_idx].cells
-            for c_idx in range(len(cols)):
-                row_cells[c_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                if c_idx == 0:
-                    row_cells[0].paragraphs[0].text = str(r_idx)
+            r.font.size = Pt(10)
 
     if doc_data.get("footer_notes"):
         doc.add_paragraph()
@@ -159,14 +159,21 @@ def build_docx(doc_data: dict) -> io.BytesIO:
     return stream
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("مرحباً بك! أرسل لي وصف المستند وسأقوم بإنشائه فوراً.")
+    await update.message.reply_text("مرحباً بك! يمكنك إرسال نصوص أو صور لمستندات وسأقوم بتحليلها وإنشاء ملف Word مطابِق لك.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = await update.message.reply_text("⏳ جاري التعرف على نموذج الذكاء الاصطناعي وبناء المستند...")
+    status = await update.message.reply_text("⏳ جاري تحليل الطلب والصورة وبناء المستند...")
     try:
-        data = await asyncio.to_thread(call_gemini_direct, update.message.text)
+        prompt_text = update.message.text or update.message.caption or ""
+        image_bytes = None
+
+        if update.message.photo:
+            photo_file = await update.message.photo[-1].get_file()
+            image_bytes = await photo_file.download_as_bytearray()
+
+        data = await asyncio.to_thread(call_gemini_direct, prompt_text, image_bytes)
         doc_bytes = await asyncio.to_thread(build_docx, data)
-        await update.message.reply_document(document=doc_bytes, filename="Document.docx", caption="✨ تم إنشاء المستند بنجاح!")
+        await update.message.reply_document(document=doc_bytes, filename="Document.docx", caption="✨ تم إنشاء المستند بنجاح مطابِقاً للطلب!")
         await status.delete()
     except Exception as e:
         await status.edit_text(f"❌ خطأ: {str(e)[:250]}")
@@ -174,5 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # الاستماع للنصوص والصور معاً
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
     app.run_polling(drop_pending_updates=True)
