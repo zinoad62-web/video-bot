@@ -2,10 +2,12 @@ import os
 import io
 import json
 import base64
+import time
 import urllib.request
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from docx import Document
@@ -13,6 +15,9 @@ from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
+# ---------------------------------------------------------
+# 1. خادم وهمي لإبقاء الخدمة نشطة على Render (Health Check)
+# ---------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -26,13 +31,17 @@ def run_web_port():
 
 threading.Thread(target=run_web_port, daemon=True).start()
 
+# ---------------------------------------------------------
+# 2. إعداد المفاتيح والدوال
+# ---------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 def call_gemini_direct(prompt: str, image_bytes: bytes = None) -> dict:
     if not GEMINI_API_KEY:
-        raise Exception("مفتاح GEMINI_API_KEY غير موجود!")
+        raise Exception("مفتاح GEMINI_API_KEY غير موجود في متغيرات البيئة!")
 
+    # جلب قائمة النماذج المتاحة للخدمة
     list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
     req_list = urllib.request.Request(list_url)
     
@@ -46,11 +55,12 @@ def call_gemini_direct(prompt: str, image_bytes: bytes = None) -> dict:
             if "generateContent" in methods:
                 valid_models.append(m['name'])
     except Exception as e:
-        raise Exception(f"خطأ في الاتصال بجوجل: {e}")
+        raise Exception(f"خطأ في الاتصال بخدمة جوجل: {e}")
 
     if not valid_models:
-        raise Exception("لم يتم العثور على أي نموذج مفعل.")
+        raise Exception("لم يتم العثور على أي نموذج مفعل متاح لك.")
 
+    # توجيهات الذكاء الاصطناعي لاستخراج بيانات المستند
     system_instruction = (
         "أنت خبير في تحليل الوثائق والصور وتصميم مستندات Word. قم بتحليل الطلب والصورة المرفقة (إن وجدت) "
         "وأرجع الناتج بصيغة JSON فقط بدون أسلوب markdown:\n"
@@ -66,6 +76,7 @@ def call_gemini_direct(prompt: str, image_bytes: bytes = None) -> dict:
     )
 
     parts = []
+    # تحويل الصورة إلى base64 إذا كانت متوفرة
     if image_bytes:
         b64_image = base64.b64encode(image_bytes).decode('utf-8')
         parts.append({
@@ -91,6 +102,7 @@ def call_gemini_direct(prompt: str, image_bytes: bytes = None) -> dict:
                 res_json = json.loads(res_body)
                 text = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
                 
+                # تنظيف النص من أوسمة البرمجة
                 if text.startswith("```json"): text = text[7:]
                 if text.startswith("```"): text = text[3:]
                 if text.endswith("```"): text = text[:-3]
@@ -99,16 +111,22 @@ def call_gemini_direct(prompt: str, image_bytes: bytes = None) -> dict:
             last_err = e
             continue
 
-    raise Exception(f"تعذر معالجة الصورة أو النص: {last_err}")
+    raise Exception(f"تعذر معالجة البيانات: {last_err}")
 
+# ---------------------------------------------------------
+# 3. دالة بناء ملف Word (python-docx)
+# ---------------------------------------------------------
 def build_docx(doc_data: dict) -> io.BytesIO:
     doc = Document()
+    
+    # ضبط الهوامش
     for s in doc.sections:
         s.top_margin = Inches(0.5)
         s.bottom_margin = Inches(0.5)
         s.left_margin = Inches(0.5)
         s.right_margin = Inches(0.5)
 
+    # الترويسة العلوية
     if doc_data.get("header_top"):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -116,6 +134,7 @@ def build_docx(doc_data: dict) -> io.BytesIO:
         r.font.bold = True
         r.font.size = Pt(11)
 
+    # العنوان الرئيسي
     if doc_data.get("title"):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -124,6 +143,7 @@ def build_docx(doc_data: dict) -> io.BytesIO:
         r.font.size = Pt(14)
         r.font.color.rgb = RGBColor(0, 51, 102)
 
+    # المعلومات الفرعية (البيانات)
     if doc_data.get("metadata"):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -131,6 +151,7 @@ def build_docx(doc_data: dict) -> io.BytesIO:
         r.font.bold = True
         r.font.size = Pt(10)
 
+    # إضافة الجدول
     if doc_data.get("has_table", False):
         cols = doc_data.get("table_columns", ["العمود 1", "العمود 2"])
         rows_cnt = doc_data.get("rows_count", 5)
@@ -146,6 +167,7 @@ def build_docx(doc_data: dict) -> io.BytesIO:
             r.font.bold = True
             r.font.size = Pt(10)
 
+    # الهامش السفلي
     if doc_data.get("footer_notes"):
         doc.add_paragraph()
         p = doc.add_paragraph()
@@ -158,6 +180,9 @@ def build_docx(doc_data: dict) -> io.BytesIO:
     stream.seek(0)
     return stream
 
+# ---------------------------------------------------------
+# 4. معالجات أوامر ورسائل تليغرام
+# ---------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("مرحباً بك! يمكنك إرسال نصوص أو صور لمستندات وسأقوم بتحليلها وإنشاء ملف Word مطابِق لك.")
 
@@ -167,21 +192,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt_text = update.message.text or update.message.caption or ""
         image_bytes = None
 
+        # استخراج الصورة في حال إرسال صورة
         if update.message.photo:
             photo_file = await update.message.photo[-1].get_file()
             image_bytes = await photo_file.download_as_bytearray()
 
+        # معالجة الطلب في الخلفية
         data = await asyncio.to_thread(call_gemini_direct, prompt_text, image_bytes)
         doc_bytes = await asyncio.to_thread(build_docx, data)
-        await update.message.reply_document(document=doc_bytes, filename="Document.docx", caption="✨ تم إنشاء المستند بنجاح مطابِقاً للطلب!")
+        
+        await update.message.reply_document(
+            document=doc_bytes, 
+            filename="Document.docx", 
+            caption="✨ تم إنشاء المستند بنجاح!"
+        )
         await status.delete()
     except Exception as e:
-        await status.edit_text(f"❌ خطأ: {str(e)[:250]}")
+        await status.edit_text(f"❌ حدث خطأ: {str(e)[:250]}")
 
+# ---------------------------------------------------------
+# 5. التشغيل الرئيسي مع تفادي تعارض Polling
+# ---------------------------------------------------------
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
     
-    # الاستماع للنصوص والصور معاً
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
-    app.run_polling(drop_pending_updates=True)
+
+    print("🤖 البوت يعمل الآن...")
+
+    # حلقة تكرار لإعادة الاتصال التلقائي في حال وجود تعارض مؤقت أثناء Deployment على Render
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True, stop_signals=None)
+            break
+        except Exception as e:
+            print(f"⚠️ تعارض أو خطأ شبكة مؤقت: {e}. إعادة المحاولة بعد 10 ثوانٍ...")
+            time.sleep(10)
