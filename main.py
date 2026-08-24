@@ -12,7 +12,7 @@ from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
-# خادم حيوية لإبقاء البوت متصلاً على Render
+# خادم حيوية لإبقاء البوت متصلاً
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -29,10 +29,28 @@ threading.Thread(target=run_web_port, daemon=True).start()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# اتصال مباشر بشبكة جوجل بدون مكتبات وسيطة لتفادي أخطاء 404
 def call_gemini_direct(prompt: str) -> dict:
     if not GEMINI_API_KEY:
         raise Exception("مفتاح GEMINI_API_KEY غير موجود في إعدادات Render!")
+
+    # 1. اكتشاف النماذج المتاحة لمفتاحك تلقائياً لتفادي خطأ 404 نهائياً
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    req_list = urllib.request.Request(list_url)
+    
+    try:
+        with urllib.request.urlopen(req_list, timeout=15) as res:
+            models_data = json.loads(res.read().decode('utf-8'))
+            
+        valid_models = []
+        for m in models_data.get("models", []):
+            methods = m.get("supportedGenerationMethods", [])
+            if "generateContent" in methods:
+                valid_models.append(m['name']) # مثال: models/gemini-1.5-flash
+    except Exception as e:
+        raise Exception(f"خطأ في مفتاح Google API: {e}")
+
+    if not valid_models:
+        raise Exception("لم يتم العثور على أي نموذج مفعل لهذا المفتاح.")
 
     system_instruction = (
         "أنت خبير في تصميم الوثائق المدرسية والإدارية. قم بتحليل طلب المستخدم وأرجع الناتج بصيغة JSON فقط "
@@ -48,19 +66,18 @@ def call_gemini_direct(prompt: str) -> dict:
         "}"
     )
 
-    models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-    last_err = None
+    payload = {
+        "contents": [{
+            "parts": [{"text": f"{system_instruction}\n\nطلب المستخدم:\n{prompt}"}]
+        }]
+    }
+    data = json.dumps(payload).encode('utf-8')
 
-    for model_name in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{
-                "parts": [{"text": f"{system_instruction}\n\nطلب المستخدم:\n{prompt}"}]
-            }]
-        }
-        
+    # 2. تجربة النماذج المكتشفة بالترتيب
+    last_err = None
+    for model_full_name in valid_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_full_name}:generateContent?key={GEMINI_API_KEY}"
         try:
-            data = json.dumps(payload).encode('utf-8')
             req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=30) as response:
                 res_body = response.read().decode('utf-8')
@@ -75,7 +92,7 @@ def call_gemini_direct(prompt: str) -> dict:
             last_err = e
             continue
 
-    raise Exception(f"خطأ في الاتصال: {last_err}")
+    raise Exception(f"تعذر التوليد: {last_err}")
 
 def build_docx(doc_data: dict) -> io.BytesIO:
     doc = Document()
@@ -145,7 +162,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("مرحباً بك! أرسل لي وصف المستند وسأقوم بإنشائه فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = await update.message.reply_text("⏳ جاري تحليل الطلب وبناء جدول 35 تلميذاً...")
+    status = await update.message.reply_text("⏳ جاري التعرف على نموذج الذكاء الاصطناعي وبناء المستند...")
     try:
         data = await asyncio.to_thread(call_gemini_direct, update.message.text)
         doc_bytes = await asyncio.to_thread(build_docx, data)
@@ -158,4 +175,4 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
